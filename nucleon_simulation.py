@@ -1,6 +1,8 @@
 import pygame
 import random
 import math
+import numpy as np
+from collections import defaultdict
 
 # Initialize Pygame
 pygame.init()
@@ -8,193 +10,276 @@ pygame.init()
 # Screen dimensions
 WIDTH, HEIGHT = 200, 200
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Nucleon Simulation")
+pygame.display.set_caption("Nuclear Decay Simulation")
 
 # Colors
-BLACK = (20, 20, 20)
-RED = (255, 0, 0)  # Protons
-BLUE = (50, 50, 255)  # Neutrons
+BLACK = (0, 0, 0)
+RED = (255, 50, 50)    # Protons
+BLUE = (100, 100, 255) # Neutrons
+GREEN = (50, 255, 50)  # Electrons (β⁻)
+PINK = (255, 100, 255) # Positrons (β⁺)
+WHITE = (255, 255, 255)
 
 # Nucleon properties
-NUCLEON_RADIUS = 2  # Approx. 0.84 fm scaled to simulation units
+NUCLEON_RADIUS = 2
+FRAGMENT_DISTANCE = 100
 
+# Physics parameters
 STRONG_FORCE_RADIUS = 30
-ELECTROSTATIC_CONSTANT = 80  # Simplified constant for repulsion
-ELECTROSTATIC_RADIUS = 50  # Radius where repulsion is zero
-STRONG_FORCE_CUTOFF = 0.001  # Fraction of maximum force
-STRONG_FORCE_CONSTANT = 10  # Simplified constant for strong nuclear force
-MAX_VELOCITY = 5  # Maximum velocity for nucleons
+ELECTROSTATIC_CONSTANT = 40
+STRONG_FORCE_CONSTANT = 10
+MAX_VELOCITY = 2
+SPRING_DAMPENING = 0.3
 
-# Spring dampening global variable
-SPRING_DAMPENING = 0.2  # Controls the strength of velocity damping
+# Decay parameters
+BETA_DECAY_PROBABILITY = 0.002
+NEUTRON_RICH_THRESHOLD = 1.5
+PROTON_RICH_THRESHOLD = 1.2
 
-# Update global variables for protons and neutrons
-NUM_PROTONS = 12
-NUM_NEUTRONS = 6
+# Particle counts
+INITIAL_PROTONS = 12
+INITIAL_NEUTRONS = 16
 
-# Nucleon class
 class Nucleon:
-    def __init__(self, x, y, charge):
-        # Remove randomness from nucleon type assignment
-        self.nucleon = charge  # 0 = Neutron, 1 = Proton
-        self.charge = self.nucleon
-        self.posX = x
-        self.posY = y
-        self.velX = random.uniform(-1, 1)
-        self.velY = random.uniform(-1, 1)
-        self.color = RED if self.charge == 1 else BLUE
-        self.neighbors = 0  # Initialize neighbors count
+    def __init__(self, x, y, is_proton):
+        self.is_proton = is_proton  # Fixed typo in variable name
+        self.pos = np.array([float(x), float(y)])
+        self.vel = np.array([random.uniform(-0.1, 0.1), random.uniform(-0.1, 0.1)])
+        self.color = RED if is_proton else BLUE
+        self.fragment_id = 0
+        self.bond_strength = 0
 
-    def enforce_max_velocity(self):
-        # Enforce maximum velocity
-        speed = math.sqrt(self.velX**2 + self.velY**2)
-        if speed > MAX_VELOCITY:
-            scale = MAX_VELOCITY / speed
-            self.velX *= scale
-            self.velY *= scale
+    def update(self, nucleons):
+        self.calculate_neighbors(nucleons)
+        self.apply_forces(nucleons)
+        self.move()
+        return self.check_decay(nucleons)
 
-    def move(self):
-        # Enforce maximum velocity before moving
-        self.enforce_max_velocity()
+    def apply_forces(self, nucleons):
+        for other in nucleons:
+            if other is not self:
+                if self.is_proton and other.is_proton:
+                    self.electrostatic_force(other)
+                self.strong_force(other)
 
-        self.posX += self.velX
-        self.posY += self.velY
-
-        # Bounce off walls
-        if self.posX < 0 or self.posX > WIDTH:
-            self.velX *= -1
-        if self.posY < 0 or self.posY > HEIGHT:
-            self.velY *= -1
-            
-        # Validate positions
-        if not math.isfinite(self.posX) or not math.isfinite(self.posY):
-            self.posX, self.posY = WIDTH // 2, HEIGHT // 2  # Reset to center
-            
-    def repulsion(self, other):
-        if self.nucleon == 1 and other.nucleon == 1:  # Only protons repel
-            dx = other.posX - self.posX
-            dy = other.posY - self.posY
-            distance = max(math.sqrt(dx**2 + dy**2), 1e-5)  # Clamp distance to prevent division by zero
-
-            if distance < ELECTROSTATIC_RADIUS:
-                # Inverse-square law for repulsion
-                force = ELECTROSTATIC_CONSTANT / (distance**2)
-                fx = force * (dx / distance)
-                fy = force * (dy / distance)
-
-                # Apply forces
-                self.velX -= fx
-                self.velY -= fy
-                other.velX += fx
-                other.velY += fy
+    def electrostatic_force(self, other):
+        delta = other.pos - self.pos
+        distance = max(np.linalg.norm(delta), 0.1)
+        if distance < 100:
+            force = (ELECTROSTATIC_CONSTANT / (distance**2 + 1)) * delta/distance
+            self.vel -= force * 0.5
+            other.vel += force * 0.5
 
     def strong_force(self, other):
-        dx = other.posX - self.posX
-        dy = other.posY - self.posY
-        distance = max(math.sqrt(dx**2 + dy**2), 1e-5)  # Clamp distance to prevent division by zero
-
+        delta = other.pos - self.pos
+        distance = max(np.linalg.norm(delta), 0.1)
+        
         if distance < STRONG_FORCE_RADIUS:
-            # Exponential decay for the strong nuclear force
-            if distance < 10:  # Very close range: repulsive strong force
-                force = STRONG_FORCE_CONSTANT * math.exp(-distance / 2) * -1  # Repulsion
-            elif distance < 20:  # Medium range: attractive strong force
-                force = STRONG_FORCE_CONSTANT * math.exp(-distance / 2)  # Attraction
-            else:  # Beyond strong force range
-                force = 0
+            if distance < 8:
+                force = -STRONG_FORCE_CONSTANT * (8 - distance) * delta/distance
+            elif distance < 20:
+                force = STRONG_FORCE_CONSTANT * math.exp(-distance/5) * delta/distance
+            else:
+                force = np.array([0, 0])
+            
+            self.vel += force * 0.5
+            other.vel -= force * 0.5
+            
+            rel_vel = other.vel - self.vel
+            damping = SPRING_DAMPENING * (1 - distance/STRONG_FORCE_RADIUS) * rel_vel
+            self.vel += damping
+            other.vel -= damping
 
-            fx = force * (dx / distance)
-            fy = force * (dy / distance)
+    def move(self):
+        self.pos += self.vel
+        # Wrap around edges
+        self.pos[0] %= WIDTH
+        self.pos[1] %= HEIGHT
 
-            # Apply forces
-            self.velX += fx
-            self.velY += fy
-            other.velX -= fx
-            other.velY -= fy
-
-            # Calculate relative velocity and apply damping
-            rel_vel_x = other.velX - self.velX
-            rel_vel_y = other.velY - self.velY
-            rel_vel_magnitude = math.sqrt(rel_vel_x**2 + rel_vel_y**2)
-
-            damping_x = SPRING_DAMPENING * rel_vel_magnitude * (dx / distance)
-            damping_y = SPRING_DAMPENING * rel_vel_magnitude * (dy / distance)
-
-            self.velX += damping_x
-            self.velY += damping_y
-            other.velX -= damping_x
-            other.velY -= damping_y
-
-    # Add a method to calculate the number of neighbors (bonds) for each nucleon
-    def calculate_neighbors(self, all_nucleons):
+    def calculate_neighbors(self, nucleons):
         self.neighbors = 0
-        for other in all_nucleons:
+        self.bond_strength = 0
+        for other in nucleons:
             if other is not self:
-                dx = other.posX - self.posX
-                dy = other.posY - self.posY
-                distance = math.sqrt(dx**2 + dy**2)
-                if distance < STRONG_FORCE_RADIUS:  # Within bonding range
+                distance = np.linalg.norm(other.pos - self.pos)
+                if distance < STRONG_FORCE_RADIUS:
                     self.neighbors += 1
+                    if distance < 15:
+                        self.bond_strength += (15 - distance)
 
-    def decay(self):
-        pass  # Decay logic removed as per request
+    def check_decay(self, nucleons):
+        if random.random() > BETA_DECAY_PROBABILITY:
+            return None
+        
+        fragment_nucleons = [n for n in nucleons if n.fragment_id == self.fragment_id]
+        protons = sum(1 for n in fragment_nucleons if n.is_proton)
+        neutrons = len(fragment_nucleons) - protons
+        
+        if neutrons == 0 and protons == 0:
+            return None
+        
+        # Beta-minus decay
+        if (not self.is_proton and neutrons > 0 and 
+            (protons == 0 or neutrons/protons > NEUTRON_RICH_THRESHOLD) and 
+            self.bond_strength < 20):
+            
+            self.is_proton = True  # Fixed variable name
+            self.color = RED
+            print(f"β⁻ decay: n→p (n/p={neutrons}/{protons})")
+            return {"pos": self.pos.copy(), "type": "electron"}
+        
+        # Beta-plus decay
+        elif (self.is_proton and protons > 0 and 
+              (neutrons == 0 or protons/neutrons > PROTON_RICH_THRESHOLD) and 
+              self.bond_strength < 15):
+            
+            self.is_proton = False
+            self.color = BLUE
+            print(f"β⁺ decay: p→n (p/n={protons}/{neutrons})")
+            return {"pos": self.pos.copy(), "type": "positron"}
+        
+        return None
 
-# Update nucleon creation to spawn exactly NUM_PROTONS protons and NUM_NEUTRONS neutrons without randomness
+class DecayEffect:
+    def __init__(self, pos):
+        self.pos = pos
+        self.lifetime = 1
+        self.radius = NUCLEON_RADIUS * 5
+        
+    def draw(self, screen):
+        if self.lifetime > 0:
+            for r in range(self.radius, 0, -1):
+                alpha = int(255 * (r/self.radius))
+                color = (255, 255, 255, alpha)
+                pygame.draw.circle(screen, color, self.pos.astype(int), r)
+            self.lifetime -= 1
+
+def detect_fragments(nucleons):
+    """Identify separate clusters using connected components"""
+    if not nucleons:
+        return []
+    
+    n = len(nucleons)
+    adj = np.zeros((n, n), dtype=bool)
+    
+    for i in range(n):
+        for j in range(i+1, n):
+            distance = np.linalg.norm(nucleons[i].pos - nucleons[j].pos)
+            if distance < STRONG_FORCE_RADIUS * 0.7:
+                adj[i][j] = adj[j][i] = True
+                
+    visited = [False] * n
+    components = []
+    
+    for i in range(n):
+        if not visited[i]:
+            stack = [i]
+            visited[i] = True
+            component = [i]
+            
+            while stack:
+                node = stack.pop()
+                for neighbor in range(n):
+                    if adj[node][neighbor] and not visited[neighbor]:
+                        visited[neighbor] = True
+                        stack.append(neighbor)
+                        component.append(neighbor)
+            
+            components.append(component)
+    
+    return components
+
+# Initialize simulation
 nucleons = []
-for i in range(NUM_PROTONS):
-    x = (i % 5) * (WIDTH // 5) + (WIDTH // 10)  # Distribute protons evenly
-    y = (i // 5) * (HEIGHT // 5) + (HEIGHT // 10)
-    nucleons.append(Nucleon(x, y, 1))  # Proton
-for i in range(NUM_NEUTRONS):
-    x = (i % 5) * (WIDTH // 5) + (WIDTH // 10)  # Distribute neutrons evenly
-    y = (i // 5) * (HEIGHT // 5) + (HEIGHT // 10)
-    nucleons.append(Nucleon(x, y, 0))  # Neutron
+for i in range(INITIAL_PROTONS + INITIAL_NEUTRONS):
+    angle = random.uniform(0, 2*math.pi)
+    r = random.uniform(0, 20)
+    x = WIDTH//2 + r * math.cos(angle)
+    y = HEIGHT//2 + r * math.sin(angle)
+    is_proton = (i < INITIAL_PROTONS)
+    nucleons.append(Nucleon(x, y, is_proton))
 
+decay_effects = []
 clock = pygame.time.Clock()
+font = pygame.font.SysFont('Arial', 16)
+show_fragments = False
 
-# Main loop
 running = True
 while running:
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
         elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_UP:  # Increase velocity by 10%
-                for nucleon in nucleons:
-                    nucleon.velX *= 1.1
-                    nucleon.velY *= 1.1
-            elif event.key == pygame.K_DOWN:  # Decrease velocity by 10%
-                for nucleon in nucleons:
-                    nucleon.velX *= 0.9
-                    nucleon.velY *= 0.9
+            if event.key == pygame.K_f:
+                show_fragments = not show_fragments
+            elif event.key == pygame.K_r:
+                nucleons = []
+                for i in range(INITIAL_PROTONS + INITIAL_NEUTRONS):
+                    angle = random.uniform(0, 2*math.pi)
+                    r = random.uniform(0, 20)
+                    x = WIDTH//2 + r * math.cos(angle)
+                    y = HEIGHT//2 + r * math.sin(angle)
+                    is_proton = (i < INITIAL_PROTONS)
+                    nucleons.append(Nucleon(x, y, is_proton))
+                decay_effects = []
 
-    # Clear screen
     screen.fill(BLACK)
-
-    # Update and draw nucleons
-    for i, nucleon in enumerate(nucleons):
-        nucleon.calculate_neighbors(nucleons)  # Calculate neighbors for each nucleon
-        for j, other in enumerate(nucleons):
-            if i != j:  # Ensure it's not the same nucleon
-                nucleon.repulsion(other)
-                nucleon.strong_force(other)  # Apply strong nuclear force
-
-                # Draw faint lines if nucleons are more attracted than repulsed
-                dx = other.posX - nucleon.posX
-                dy = other.posY - nucleon.posY
-                distance = max(math.sqrt(dx**2 + dy**2), 1e-5)
-                if distance < STRONG_FORCE_RADIUS and distance >= 10:
-                    pygame.draw.line(screen, (100, 100, 100), (nucleon.posX, nucleon.posY), (other.posX, other.posY), 1)
-
-        nucleon.move()
-        pygame.draw.circle(screen, nucleon.color, (int(nucleon.posX), int(nucleon.posY)), NUCLEON_RADIUS)
-
-    # Update display
+    
+    # Update fragments
+    fragments = detect_fragments(nucleons)
+    for frag_id, fragment in enumerate(fragments):
+        for n_idx in fragment:
+            nucleons[n_idx].fragment_id = frag_id
+    
+    # Update nucleons and check for decays
+    for nucleon in nucleons:
+        decay_result = nucleon.update(nucleons)
+        if decay_result:
+            decay_effects.append(DecayEffect(decay_result["pos"]))
+    
+    # Draw bonds
+    for i, n1 in enumerate(nucleons):
+        for n2 in nucleons[i+1:]:
+            distance = np.linalg.norm(n1.pos - n2.pos)
+            if distance < STRONG_FORCE_RADIUS:
+                if show_fragments:
+                    if n1.fragment_id == n2.fragment_id:
+                        color = (100, 100, 255) if n1.fragment_id == 0 else (255, 100, 100)
+                    else:
+                        color = (200, 200, 200)
+                else:
+                    alpha = min(255, int(255 * (1 - distance/STRONG_FORCE_RADIUS)))
+                    color = (100, 100, 100, alpha)
+                pygame.draw.line(screen, color, n1.pos.astype(int), n2.pos.astype(int), 1)
+    
+    # Draw decay effects
+    for effect in decay_effects[:]:
+        effect.draw(screen)
+        if effect.lifetime <= 0:
+            decay_effects.remove(effect)
+    
+    # Draw nucleons
+    for nucleon in nucleons:
+        if show_fragments:
+            frag_color = (100, 100, 255) if nucleon.fragment_id == 0 else (255, 100, 100)
+            pygame.draw.circle(screen, frag_color, nucleon.pos.astype(int), NUCLEON_RADIUS + 1)
+        pygame.draw.circle(screen, nucleon.color, nucleon.pos.astype(int), NUCLEON_RADIUS)
+        if nucleon.is_proton:
+            pygame.draw.circle(screen, WHITE, nucleon.pos.astype(int), NUCLEON_RADIUS//2)
+    
+    # Display info
+    protons = sum(1 for n in nucleons if n.is_proton)
+    neutrons = len(nucleons) - protons
+    info_text = [
+        f"Protons: {protons}  Neutrons: {neutrons}  n/p: {neutrons/max(1,protons):.2f}",
+        f"Fragments: {len(fragments)}",
+        "F: Toggle fragments  R: Reset"
+    ]
+    for i, text in enumerate(info_text):
+        text_surface = font.render(text, True, WHITE)
+        screen.blit(text_surface, (10, 10 + i*20))
+    
     pygame.display.flip()
-
-    # Cap the frame rate at 60 FPS
     clock.tick(60)
 
-# Clean up
 pygame.quit()
-
-
